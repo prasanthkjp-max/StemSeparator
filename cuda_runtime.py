@@ -114,21 +114,29 @@ def is_setup() -> bool:
 
 
 def find_system_python() -> str | None:
-    """Locate a system Python able to create venvs (needed for setup)."""
-    for launcher in ("py", "python", "python3"):
-        exe = shutil.which(launcher)
-        if not exe:
-            continue
+    """Locate a system Python able to create venvs (needed for setup).
+
+    Prefers Python 3.11 — the same version the exe is built with — so the
+    CUDA venv matches the frozen app's ABI.
+    """
+    candidates = [
+        ["py", "-3.11"],
+        ["py", "-3"],
+        ["py"],
+        ["python"],
+        ["python3"],
+    ]
+    for cmd in candidates:
         try:
             r = subprocess.run(
-                [exe, "-c", "import sys; print(sys.version_info[:2])"],
+                [*cmd, "-c", "import sys; print(sys.version_info[:2])"],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 creationflags=_creation_flags(),
             )
             if r.returncode == 0:
-                return exe
+                return cmd[0]
         except Exception:  # noqa: BLE001
             continue
     return None
@@ -226,12 +234,20 @@ def run_separation(
     log_cb: LogCb,
 ) -> dict[str, str]:
     """Run separation in the CUDA venv subprocess; return {stem: wav_path}."""
-    pyexe = cuda_env_dir() / "Scripts" / "python.exe"
+    env_dir = cuda_env_dir()
+    pyexe = env_dir / "Scripts" / "python.exe"
     if not pyexe.is_file():
         raise RuntimeError("CUDA environment not set up. Enable GPU acceleration first.")
 
+    # Run the worker from its copy INSIDE the venv (not the exe's extraction
+    # dir): the extraction dir is full of Python 3.11 binaries that conflict
+    # with the venv's Python version. Refresh the copies so they always match
+    # the exe, even if the venv predates this version.
+    shutil.copy(_resource("separator.py"), env_dir / "separator.py")
+    shutil.copy(_resource("cuda_worker.py"), env_dir / "cuda_worker.py")
+
     proc = subprocess.Popen(
-        [str(pyexe), str(_resource("cuda_worker.py")), audio_path, output_dir, model],
+        [str(pyexe), str(env_dir / "cuda_worker.py"), audio_path, output_dir, model],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

@@ -13,6 +13,16 @@ stdout using the line protocol parsed by ``cuda_runtime.run_separation``:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+# Never import from the PyInstaller extraction dir (sys._MEIPASS): it is full
+# of Python 3.11 binaries (numpy, yaml, ...) that conflict with the CUDA
+# venv's Python version ("Module use of python311.dll conflicts..."). The
+# worker is launched from a copy inside the venv, whose dir is clean and
+# holds separator.py; drop any extraction-dir entry defensively.
+for _entry in list(sys.path):
+    if _entry and (Path(_entry) / "python311.dll").exists():
+        sys.path.remove(_entry)
 
 # Fail fast with a clear diagnostic instead of separator.py's generic
 # "Demucs is not installed" (which masks torch/torchaudio version mismatch).
