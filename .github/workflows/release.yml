@@ -56,12 +56,13 @@ jobs:
           test "$SIZE" -gt 100000000  # expect > 100 MB
 
       - name: Create Release and upload asset
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          gh release create "$TAG" dist/StemSeparator.exe `
-            --repo "${{ github.repository }}" `
-            --title "StemSeparator $TAG" `
-            --notes "Windows build (CPU-only torch, ~1 GB). See README for usage." `
+          gh release create "$TAG" dist/StemSeparator.exe \
+            --repo "${{ github.repository }}" \
+            --title "StemSeparator $TAG" \
+            --notes "Windows build (CPU-only torch, ~1 GB). See README for usage." \
             --generate-notes
