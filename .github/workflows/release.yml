@@ -1,0 +1,67 @@
+# ======================================================================
+# RELEASE — build the Windows exe and attach it to a GitHub Release.
+#
+# Trigger: push a tag `v*` (e.g. `git tag v1.0.0 && git push --tags`)
+# or run manually via Actions > Release > Run workflow.
+#
+# The exe is built with CPU-only torch (~1 GB) so it runs on any
+# Windows machine without a GPU. CUDA users can still use the app —
+# Demucs falls back to CPU automatically.
+# ======================================================================
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create the Release and upload the asset
+
+jobs:
+  build:
+    name: Build Windows exe
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU-only torch (smaller exe, no GPU needed)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install app dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --clean build.spec
+
+      - name: Smoke test — exe exists and is non-trivial
+        shell: bash
+        run: |
+          ls -la dist/
+          test -f dist/StemSeparator.exe
+          SIZE=$(stat -c%s dist/StemSeparator.exe)
+          echo "exe size: $SIZE bytes"
+          test "$SIZE" -gt 100000000  # expect > 100 MB
+
+      - name: Create Release and upload asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" dist/StemSeparator.exe `
+            --repo "${{ github.repository }}" `
+            --title "StemSeparator $TAG" `
+            --notes "Windows build (CPU-only torch, ~1 GB). See README for usage." `
+            --generate-notes
