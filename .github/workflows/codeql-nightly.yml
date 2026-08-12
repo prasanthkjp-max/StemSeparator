@@ -1,0 +1,67 @@
+# ======================================================================
+# TIER 3 — Nightly Deep Semantic Audit (out-of-band)
+# Full-repository inter-procedural taint analysis + data-flow tracking
+# with GitHub CodeQL. Runs daily at midnight UTC, on demand, and on
+# pushes to main.
+#
+# This repo is PUBLIC, so GHAS code scanning is available: results are
+# uploaded directly to Security -> Code scanning (upload: always).
+# ======================================================================
+name: Nightly Deep Audit (CodeQL)
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # 00:00 UTC daily
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write # upload SARIF to the code-scanning tab
+  actions: read # CodeQL fetches workflow-run info for status reporting
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python"] # primary application language
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Initialize CodeQL with the extended security query suites:
+      #   security-extended  — additional security queries
+      #   security-and-quality — security + correctness/dataflow queries
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      # Python is interpreted, so autobuild is a no-op; it is kept so the
+      # pipeline is identical for compiled languages (swap for a real
+      # build step there, e.g. `make build` / `pip install -e .`).
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      # Full inter-procedural analysis with taint/data-flow tracking.
+      # Public repo -> upload to the code-scanning tab (GHAS).
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: sarif-results
+          upload: always
+
+      - name: Upload CodeQL SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: sarif-results
+          if-no-files-found: ignore
