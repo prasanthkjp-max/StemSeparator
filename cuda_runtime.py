@@ -28,6 +28,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 TORCH_INDEX = "https://download.pytorch.org/whl/cu126"
+# Pin torch + torchaudio to the SAME version: torchaudio must match torch
+# exactly or ``import torchaudio`` fails (which silently disables demucs).
+# The cu126 index currently ships torch up to 2.13.0 but torchaudio only to
+# 2.11.0, so unpinned installs produce a broken pair (torch 2.13 + torchaudio
+# 2.11) — exactly the bug that shipped in v1.1.0.
+TORCH_VERSION = "2.11.0"
 DEMUCS_VERSION = "4.1.0"
 
 ProgressCb = Callable[[float, str], None]
@@ -84,17 +90,22 @@ def gpu_name() -> str:
         return ""
 
 
+_HEALTH_CHECK = (
+    "import torch, torchaudio; from demucs.api import Separator; print(torch.cuda.is_available())"
+)
+
+
 def is_setup() -> bool:
-    """True if the CUDA venv exists and torch can actually see the GPU."""
+    """True if the CUDA venv is healthy: torch+torchaudio match and demucs imports."""
     pyexe = cuda_env_dir() / "Scripts" / "python.exe"
     if not pyexe.is_file():
         return False
     try:
         r = subprocess.run(
-            [str(pyexe), "-c", "import torch; print(torch.cuda.is_available())"],
+            [str(pyexe), "-c", _HEALTH_CHECK],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
             creationflags=_creation_flags(),
         )
         return r.returncode == 0 and r.stdout.strip() == "True"
@@ -164,7 +175,16 @@ def setup(progress_cb: ProgressCb, log_cb: LogCb) -> None:
 
     progress_cb(0.15, "Downloading CUDA torch (~2.5 GB, one-time)…")
     _run_streamed(
-        [str(pyexe), "-m", "pip", "install", "torch", "torchaudio", "--index-url", TORCH_INDEX],
+        [
+            str(pyexe),
+            "-m",
+            "pip",
+            "install",
+            f"torch=={TORCH_VERSION}",
+            f"torchaudio=={TORCH_VERSION}",
+            "--index-url",
+            TORCH_INDEX,
+        ],
         log_cb,
     )
 
@@ -178,15 +198,19 @@ def setup(progress_cb: ProgressCb, log_cb: LogCb) -> None:
     shutil.copy(_resource("separator.py"), env_dir / "separator.py")
     shutil.copy(_resource("cuda_worker.py"), env_dir / "cuda_worker.py")
 
-    progress_cb(0.95, "Verifying CUDA…")
+    progress_cb(0.95, "Verifying CUDA + demucs…")
     r = subprocess.run(
-        [str(pyexe), "-c", "import torch; print(torch.cuda.is_available())"],
+        [str(pyexe), "-c", _HEALTH_CHECK],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
         creationflags=_creation_flags(),
     )
-    if r.returncode != 0 or r.stdout.strip() != "True":
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"Environment check failed — demucs could not import:\n{r.stderr.strip()[-500:]}"
+        )
+    if r.stdout.strip() != "True":
         raise RuntimeError(
             "CUDA verification failed — torch could not see the GPU. "
             "Check that the NVIDIA driver is up to date."

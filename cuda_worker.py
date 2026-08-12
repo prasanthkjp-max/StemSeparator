@@ -14,7 +14,17 @@ from __future__ import annotations
 
 import sys
 
-from separator import StemSeparator
+# Fail fast with a clear diagnostic instead of separator.py's generic
+# "Demucs is not installed" (which masks torch/torchaudio version mismatch).
+try:
+    import torch  # noqa: F401 - importing validates the torch/torchaudio pair
+    import torchaudio  # noqa: F401 - must match torch's version exactly
+    from demucs.api import Separator, save_audio  # noqa: F401
+
+    from separator import StemSeparator
+except Exception as exc:  # noqa: BLE001 - report any failure to the parent
+    print(f"ERROR|Environment broken: {exc}", flush=True)
+    sys.exit(1)
 
 
 def main() -> int:
