@@ -11,8 +11,8 @@ the feature degrades gracefully with a clear message when unavailable.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional, Union
 
 try:
     import torch
@@ -48,7 +48,7 @@ class StemSeparator:
 
     STEMS = ("vocals", "drums", "bass", "other")
 
-    def __init__(self, model: str = "htdemucs", device: Optional[str] = None) -> None:
+    def __init__(self, model: str = "htdemucs", device: str | None = None) -> None:
         if not DEMUCS_AVAILABLE:
             raise RuntimeError("Demucs is not installed. Install it with: pip install demucs")
         self.model = model
@@ -79,9 +79,9 @@ class StemSeparator:
 
     def separate(
         self,
-        audio_path: Union[str, Path],
-        output_dir: Union[str, Path],
-        progress_callback: Optional[Callable[[float, str], None]] = None,
+        audio_path: str | Path,
+        output_dir: str | Path,
+        progress_callback: Callable[[float, str], None] | None = None,
     ) -> dict[str, str]:
         """Separate ``audio_path`` into stems.
 
@@ -134,5 +134,7 @@ class StemSeparator:
                 )
 
         if progress_callback:
-            progress_callback(1.0, "Separation cancelled." if self._cancelled else "Separation complete.")
+            progress_callback(
+                1.0, "Separation cancelled." if self._cancelled else "Separation complete."
+            )
         return results

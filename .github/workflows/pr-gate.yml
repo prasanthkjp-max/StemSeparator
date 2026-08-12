@@ -1,0 +1,162 @@
+# ======================================================================
+# TIER 2 — Fast PR Gate
+# Runs on every Pull Request to `main`.
+# Fast, deterministic, and secret-free: lint + secret scan + SAST + SCA
+# + import check. FAILS ONLY ON CRITICAL/HIGH SEVERITY FINDINGS (per policy).
+# ======================================================================
+name: PR Gate (fast)
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: lint + secrets (seconds)
+  # ------------------------------------------------------------------
+  lint:
+    name: Lint & Secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.16.2
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Gitleaks secret scan
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          /tmp/gitleaks detect --source . --no-banner --redact --verbose
+
+  # ------------------------------------------------------------------
+  # Job 2: import check — every module must compile and import cleanly.
+  # (The app has no test suite yet; this is the cheapest smoke gate.)
+  # ------------------------------------------------------------------
+  import-check:
+    name: Import check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Compile all modules
+        run: python -m compileall -q main.py main_window.py separator.py
+
+      - name: Import separator (guards the optional-dependency path)
+        run: python -c "import separator; print('demucs available:', separator.demucs_available())"
+
+  # ------------------------------------------------------------------
+  # Job 3: SAST — Semgrep, targeting CHANGED files only (fast)
+  # Rulesets: p/security-audit (security) + p/default (correctness)
+  # Threshold: --severity ERROR == CRITICAL/HIGH only; WARNING/INFO do NOT fail.
+  # ------------------------------------------------------------------
+  sast:
+    name: SAST (Semgrep — changed files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history so we can diff against the base
+
+      - name: Collect changed Python files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="origin/main"
+          fi
+          # --diff-filter=ACMR excludes Deleted paths. Without it a PR that
+          # removes or renames a .py file hands Semgrep a path that is not in
+          # the checkout, and it exits 2 ("Invalid scanning root") — a hard
+          # error, not a finding, which fails the gate with results: [].
+          FILES="$(git diff --name-only --diff-filter=ACMR "$BASE" "$GITHUB_SHA" -- '*.py' '*.pyi' || true)"
+          # Join with spaces: GITHUB_OUTPUT is line-based, so a newline-
+          # separated list would be parsed as multiple keys and fail.
+          FILES_SPACED="$(echo "$FILES" | tr '\n' ' ' | sed 's/ *$//')"
+          echo "changed=$FILES_SPACED" >> "$GITHUB_OUTPUT"
+          echo "changed_files: $FILES_SPACED"
+
+      - name: Semgrep (p/security-audit + p/default)
+        if: steps.changed.outputs.changed != ''
+        run: |
+          docker run --rm -v "${PWD}:/src" semgrep/semgrep \
+            semgrep \
+              --config "p/security-audit" \
+              --config "p/default" \
+              --severity ERROR \
+              --error \
+              --metrics=off \
+              --output /src/semgrep.json \
+              --json \
+              ${{ steps.changed.outputs.changed }}
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semgrep-report
+          path: semgrep.json
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------
+  # Job 4: SCA — Trivy dependency scan
+  # Threshold: CRITICAL/HIGH only; unfixed-only; fails via exit-code 1.
+  # ------------------------------------------------------------------
+  sca:
+    name: SCA (Trivy dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Trivy filesystem scan (CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+          skip-dirs: venv,build,dist,.git,__pycache__,.pytest_cache
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-report
+          path: trivy-results.sarif
+          if-no-files-found: ignore

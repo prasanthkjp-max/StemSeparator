@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -32,10 +32,10 @@ from PyQt6.QtWidgets import (
 from separator import StemSeparator, best_device, demucs_available
 
 MODELS = [
-    "htdemucs",      # 4 stems, default
-    "htdemucs_ft",   # 4 stems, fine-tuned (better quality, slower)
-    "htdemucs_6s",   # 6 stems (vocals/drums/bass/other/guitar/piano)
-    "htdemucs_8s",   # 8 stems (adds keys/choir)
+    "htdemucs",  # 4 stems, default
+    "htdemucs_ft",  # 4 stems, fine-tuned (better quality, slower)
+    "htdemucs_6s",  # 6 stems (vocals/drums/bass/other/guitar/piano)
+    "htdemucs_8s",  # 8 stems (adds keys/choir)
 ]
 
 
