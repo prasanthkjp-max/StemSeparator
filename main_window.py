@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import cuda_runtime
 from separator import StemSeparator, best_device, demucs_available
 
 MODELS = [
@@ -37,6 +38,53 @@ MODELS = [
     "htdemucs_6s",  # 6 stems (vocals/drums/bass/other/guitar/piano)
     "htdemucs_8s",  # 8 stems (adds keys/choir)
 ]
+
+
+class CudaSetupWorker(QThread):
+    """Set up the on-demand CUDA environment off the UI thread."""
+
+    progress = pyqtSignal(float, str)
+    log = pyqtSignal(str)
+    finished_ok = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            cuda_runtime.setup(
+                progress_cb=lambda p, m: self.progress.emit(p, m),
+                log_cb=self.log.emit,
+            )
+            self.finished_ok.emit()
+        except Exception as exc:  # noqa: BLE001 - report any failure to the UI
+            self.failed.emit(str(exc))
+
+
+class CudaSeparationWorker(QThread):
+    """Run separation in the CUDA venv subprocess off the UI thread."""
+
+    progress = pyqtSignal(float, str)
+    log = pyqtSignal(str)
+    finished_ok = pyqtSignal(dict)  # {stem_name: wav_path}
+    failed = pyqtSignal(str)
+
+    def __init__(self, audio_path: str, output_dir: str, model: str) -> None:
+        super().__init__()
+        self._audio_path = audio_path
+        self._output_dir = output_dir
+        self._model = model
+
+    def run(self) -> None:
+        try:
+            results = cuda_runtime.run_separation(
+                self._audio_path,
+                self._output_dir,
+                self._model,
+                progress_cb=lambda p, m: self.progress.emit(p, m),
+                log_cb=self.log.emit,
+            )
+            self.finished_ok.emit(results)
+        except Exception as exc:  # noqa: BLE001 - report any failure to the UI
+            self.failed.emit(str(exc))
 
 
 class SeparationWorker(QThread):
@@ -80,6 +128,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._worker: SeparationWorker | None = None
+        self._cuda_setup_worker: CudaSetupWorker | None = None
+        self._cuda_worker: CudaSeparationWorker | None = None
         self._last_output_dir: Path | None = None
 
         self._build_ui()
@@ -133,6 +183,16 @@ class MainWindow(QMainWindow):
         # Device
         self._device_label = QLabel()
         form.addRow("Device:", self._device_label)
+
+        # GPU acceleration (on-demand CUDA)
+        self._cuda_btn = QPushButton("Enable GPU acceleration…")
+        self._cuda_btn.setToolTip(
+            "Detected an NVIDIA GPU. Downloads CUDA torch + demucs (~2.5 GB, "
+            "one-time) for 5-10x faster separation."
+        )
+        self._cuda_btn.clicked.connect(self._on_enable_cuda)
+        self._cuda_btn.setVisible(False)
+        form.addRow("", self._cuda_btn)
 
         root.addLayout(form)
 
@@ -215,29 +275,84 @@ class MainWindow(QMainWindow):
     def _on_start(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
+        if self._cuda_worker is not None and self._cuda_worker.isRunning():
+            return
         audio = self._input_edit.text().strip()
         if not audio:
             QMessageBox.information(self, "StemSeparator", "Choose an audio file first.")
             return
         out = self._output_edit.text().strip() or str(Path(audio).parent / "stems")
         model = self._model_combo.currentText()
-        device = best_device()
 
         self._last_output_dir = Path(out)
         self._progress.setValue(0)
         self._set_running(True)
-        self._log(f"Starting separation — model: {model}, device: {device}")
 
-        self._worker = SeparationWorker(audio, out, model, device)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished_ok.connect(self._on_finished)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.start()
+        if cuda_runtime.is_setup():
+            self._log(f"Starting separation on GPU — model: {model}")
+            self._cuda_worker = CudaSeparationWorker(audio, out, model)
+            self._cuda_worker.progress.connect(self._on_progress)
+            self._cuda_worker.log.connect(self._log)
+            self._cuda_worker.finished_ok.connect(self._on_finished)
+            self._cuda_worker.failed.connect(self._on_failed)
+            self._cuda_worker.start()
+        else:
+            device = best_device()
+            self._log(f"Starting separation on CPU — model: {model}")
+            self._worker = SeparationWorker(audio, out, model, device)
+            self._worker.progress.connect(self._on_progress)
+            self._worker.finished_ok.connect(self._on_finished)
+            self._worker.failed.connect(self._on_failed)
+            self._worker.start()
+
+    def _on_enable_cuda(self) -> None:
+        if self._cuda_setup_worker is not None and self._cuda_setup_worker.isRunning():
+            return
+        reply = QMessageBox.question(
+            self,
+            "Enable GPU acceleration",
+            "This downloads CUDA torch + demucs (~2.5 GB, one-time) and sets up "
+            "a GPU environment for 5-10x faster separation.\n\nContinue?",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._cuda_btn.setEnabled(False)
+        self._cuda_btn.setText("Setting up GPU environment…")
+        self._set_running(True)
+        self._cuda_setup_worker = CudaSetupWorker()
+        self._cuda_setup_worker.progress.connect(self._on_progress)
+        self._cuda_setup_worker.log.connect(self._log)
+        self._cuda_setup_worker.finished_ok.connect(self._on_cuda_setup_done)
+        self._cuda_setup_worker.failed.connect(self._on_cuda_setup_failed)
+        self._cuda_setup_worker.start()
+
+    def _on_cuda_setup_done(self) -> None:
+        self._cuda_setup_worker = None
+        self._set_running(False)
+        self._cuda_btn.setVisible(False)
+        self._update_device_label()
+        self._status.setText("GPU acceleration ready.")
+        self._log("GPU acceleration enabled — separation will use CUDA.")
+
+    def _on_cuda_setup_failed(self, error_msg: str) -> None:
+        self._cuda_setup_worker = None
+        self._set_running(False)
+        self._cuda_btn.setEnabled(True)
+        self._cuda_btn.setText("Enable GPU acceleration…")
+        self._status.setText("GPU setup failed.")
+        self._log(f"ERROR: {error_msg}")
+        QMessageBox.critical(self, "StemSeparator", f"GPU setup failed:\n{error_msg}")
 
     def _on_cancel(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._log("Cancelling… (finishes current stem write)")
+        elif self._cuda_worker is not None and self._cuda_worker.isRunning():
+            self._cuda_worker.terminate()
+            self._log("Cancelling…")
+        elif self._cuda_setup_worker is not None and self._cuda_setup_worker.isRunning():
+            self._cuda_setup_worker.terminate()
+            self._log("Cancelling GPU setup…")
 
     def _on_progress(self, progress: float, msg: str) -> None:
         self._progress.setValue(int(progress * 100))
@@ -247,6 +362,7 @@ class MainWindow(QMainWindow):
     def _on_finished(self, results: dict) -> None:
         self._set_running(False)
         self._worker = None
+        self._cuda_worker = None
         if not results:
             self._status.setText("Cancelled.")
             self._log("Separation cancelled — no stems written.")
@@ -260,6 +376,7 @@ class MainWindow(QMainWindow):
     def _on_failed(self, error_msg: str) -> None:
         self._set_running(False)
         self._worker = None
+        self._cuda_worker = None
         self._status.setText("Failed.")
         self._log(f"ERROR: {error_msg}")
         QMessageBox.critical(self, "StemSeparator", f"Separation failed:\n{error_msg}")
@@ -275,15 +392,27 @@ class MainWindow(QMainWindow):
     # Helpers
     # ------------------------------------------------------------------
     def _update_device_label(self) -> None:
-        if demucs_available():
-            self._device_label.setText(f"{best_device()} (auto-detected)")
-        else:
+        if not demucs_available():
             self._device_label.setText("Demucs not installed — see README")
+            return
+        if cuda_runtime.is_setup():
+            self._device_label.setText(f"GPU ({cuda_runtime.gpu_name()}) — CUDA")
+            return
+        if cuda_runtime.gpu_available():
+            self._device_label.setText(
+                f"CPU — {cuda_runtime.gpu_name()} detected, enable CUDA for 5-10x speed"
+            )
+            self._cuda_btn.setVisible(True)
+        else:
+            self._device_label.setText("CPU (no NVIDIA GPU detected)")
+            self._cuda_btn.setVisible(False)
 
     def _set_running(self, running: bool) -> None:
         self._start_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         self._model_combo.setEnabled(not running)
+        if not running and self._cuda_setup_worker is None:
+            self._cuda_btn.setEnabled(True)
 
     def _log(self, msg: str) -> None:
         self._log_view.appendPlainText(msg)

@@ -42,6 +42,17 @@ pip install pyinstaller
 pyinstaller --clean build.spec   # outputs to dist/StemSeparator.exe
 ```
 
+## GPU acceleration (on-demand CUDA)
+
+The packaged exe ships **CPU-only torch** (~195 MB) so it runs on any machine
+and stays under GitHub's 2 GB release-asset limit. If an NVIDIA GPU is
+detected, the app shows an **Enable GPU acceleration…** button:
+
+1. One-time download of CUDA torch + demucs (~2.5 GB) into
+   `%LOCALAPPDATA%\StemSeparator\cuda-env` (requires a system Python 3.11+)
+2. Separation then runs on the GPU — roughly **5-10x faster**
+3. The CPU fallback stays available; the exe itself never grows
+
 ## Models
 
 | Model | Stems | Notes |

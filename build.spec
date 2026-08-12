@@ -5,7 +5,11 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[
+        # Worker scripts copied into the on-demand CUDA venv at setup time.
+        ('separator.py', '.'),
+        ('cuda_worker.py', '.'),
+    ],
     hiddenimports=[
         'demucs',
         'demucs.api',
